@@ -11,18 +11,57 @@ class BetRequest(BaseModel):
     true_probability: float  # Your model probability (0-1)
 
 
-# ---- Helper Function ----
+# ---- Helper Functions ----
 def american_to_implied_probability(odds: int) -> float:
     if odds > 0:
         return 100 / (odds + 100)
-    else:
-        return abs(odds) / (abs(odds) + 100)
+    return abs(odds) / (abs(odds) + 100)
+
+
+def american_to_probability(odds: int) -> float:
+    if odds > 0:
+        return 100 / (odds + 100)
+    return abs(odds) / (abs(odds) + 100)
+
+
+def probability_to_american(prob: float) -> int:
+    if prob <= 0 or prob >= 1:
+        raise ValueError("Probability must be between 0 and 1")
+    if prob >= 0.5:
+        return int(round(-(prob / (1 - prob)) * 100))
+    return int(round(((1 - prob) / prob) * 100))
+
+
+def pick_best_american_price(outcomes: list[dict]) -> dict:
+    """
+    For American odds:
+    Higher number is better for the bettor.
+    Example: +120 is better than +110; -105 is better than -110.
+    """
+    best = None
+    for o in outcomes:
+        price = o.get("price")
+        if price is None:
+            continue
+        if best is None or price > best["price"]:
+            best = {"name": o.get("name"), "price": price}
+    return best
 
 
 # ---- Root ----
 @app.get("/")
 def root():
     return {"message": "Quant Bets API is running 🚀"}
+
+
+# ---- Raw Odds Endpoint ----
+@app.get("/odds/{sport_key}")
+def odds(sport_key: str):
+    try:
+        data = fetch_odds(sport_key)
+        return {"sport_key": sport_key, "games_returned": len(data), "data": data}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ---- Edge Calculator ----
@@ -36,24 +75,11 @@ def calculate_edge(bet: BetRequest):
         "implied_probability": round(implied_prob, 4),
         "true_probability": bet.true_probability,
         "edge": round(edge, 4),
-        "is_positive_ev": edge > 0
+        "is_positive_ev": edge > 0,
     }
-def pick_best_american_price(outcomes: list[dict]) -> dict:
-    """
-    For American odds:
-    - Higher number is better for the bettor.
-      Example: +120 is better than +110; -105 is better than -110.
-    """
-    best = None
-    for o in outcomes:
-        price = o.get("price")
-        if price is None:
-            continue
-        if best is None or price > best["price"]:
-            best = {"name": o.get("name"), "price": price}
-    return best
 
 
+# ---- Clean Odds Endpoint ----
 @app.get("/odds-clean/{sport_key}")
 def odds_clean(sport_key: str):
     try:
@@ -70,9 +96,9 @@ def odds_clean(sport_key: str):
         commence = game.get("commence_time")
 
         best = {
-            "h2h": {},       # moneyline best per team
-            "spreads": {},   # best spread price per team
-            "totals": {}     # best over/under price
+            "h2h": {},
+            "spreads": {},
+            "totals": {},
         }
 
         for book in game.get("bookmakers", []):
@@ -82,12 +108,12 @@ def odds_clean(sport_key: str):
                 mkey = market.get("key")
                 outcomes = market.get("outcomes", [])
 
-                # MONEYLINE
                 if mkey == "h2h":
                     for team in [home, away]:
                         team_outcomes = [o for o in outcomes if o.get("name") == team]
                         if not team_outcomes:
                             continue
+
                         candidate = pick_best_american_price(team_outcomes)
                         if not candidate:
                             continue
@@ -96,15 +122,15 @@ def odds_clean(sport_key: str):
                         if current is None or candidate["price"] > current["price"]:
                             best["h2h"][team] = {
                                 "price": candidate["price"],
-                                "book": book_title
+                                "book": book_title,
                             }
 
-                # SPREADS
                 elif mkey == "spreads":
                     for o in outcomes:
                         team = o.get("name")
                         point = o.get("point")
                         price = o.get("price")
+
                         if team not in [home, away] or price is None:
                             continue
 
@@ -113,15 +139,15 @@ def odds_clean(sport_key: str):
                         if current is None or price > current["price"]:
                             best["spreads"][key] = {
                                 "price": price,
-                                "book": book_title
+                                "book": book_title,
                             }
 
-                # TOTALS
                 elif mkey == "totals":
                     for o in outcomes:
-                        name = o.get("name")  # "Over" or "Under"
+                        name = o.get("name")
                         point = o.get("point")
                         price = o.get("price")
+
                         if name not in ["Over", "Under"] or price is None:
                             continue
 
@@ -130,7 +156,7 @@ def odds_clean(sport_key: str):
                         if current is None or price > current["price"]:
                             best["totals"][key] = {
                                 "price": price,
-                                "book": book_title
+                                "book": book_title,
                             }
 
         cleaned.append({
@@ -139,24 +165,13 @@ def odds_clean(sport_key: str):
             "commence_time": commence,
             "home_team": home,
             "away_team": away,
-            "best": best
+            "best": best,
         })
 
     return {"sport_key": sport_key, "games_returned": len(cleaned), "games": cleaned}
-    def american_to_probability(odds: int) -> float:
-    if odds > 0:
-        return 100 / (odds + 100)
-    return abs(odds) / (abs(odds) + 100)
 
 
-def probability_to_american(prob: float) -> int:
-    if prob <= 0 or prob >= 1:
-        raise ValueError("Probability must be between 0 and 1")
-    if prob >= 0.5:
-        return int(round(-(prob / (1 - prob)) * 100))
-    return int(round(((1 - prob) / prob) * 100))
-
-
+# ---- Positive EV Endpoint ----
 @app.get("/positive-ev/{sport_key}")
 def positive_ev(sport_key: str):
     try:
@@ -194,7 +209,7 @@ def positive_ev(sport_key: str):
                     if current_best is None or price > current_best["price"]:
                         best_prices[team] = {
                             "price": price,
-                            "book": book_title
+                            "book": book_title,
                         }
 
         for team in [home, away]:
@@ -220,7 +235,7 @@ def positive_ev(sport_key: str):
                     "market_avg_fair_odds": probability_to_american(avg_implied_prob),
                     "market_avg_probability": round(avg_implied_prob, 4),
                     "best_implied_probability": round(best_implied_prob, 4),
-                    "edge": round(edge, 4)
+                    "edge": round(edge, 4),
                 })
 
     ev_bets.sort(key=lambda x: x["edge"], reverse=True)
@@ -228,6 +243,5 @@ def positive_ev(sport_key: str):
     return {
         "sport_key": sport_key,
         "positive_ev_bets_found": len(ev_bets),
-        "bets": ev_bets
+        "bets": ev_bets,
     }
-    
